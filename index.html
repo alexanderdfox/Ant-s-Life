@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Langton × Life</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: "SF Pro Text", system-ui, -apple-system, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1.25rem;
+      gap: 1rem;
+    }
+    h1 {
+      font-size: 1.35rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+    .subtitle {
+      font-size: 0.85rem;
+      color: #8b949e;
+      max-width: 42rem;
+      text-align: center;
+      line-height: 1.45;
+    }
+    .wrap {
+      position: relative;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+      border: 1px solid #30363d;
+    }
+    canvas {
+      display: block;
+      cursor: crosshair;
+      image-rendering: pixelated;
+      touch-action: none;
+    }
+    canvas.drawing { cursor: cell; }
+    kbd {
+      font-family: ui-monospace, monospace;
+      font-size: 0.8em;
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+      background: #21262d;
+      border: 1px solid #30363d;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem 1rem;
+      align-items: center;
+      justify-content: center;
+      max-width: 900px;
+    }
+    button, label {
+      font-size: 0.8rem;
+    }
+    button {
+      background: #21262d;
+      border: 1px solid #30363d;
+      color: #e6edf3;
+      padding: 0.45rem 0.85rem;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    button:hover { background: #30363d; }
+    button.active { background: #238636; border-color: #2ea043; }
+    button.tool-ant.active { background: #da3633; border-color: #f85149; }
+    .tools { display: flex; gap: 0.35rem; }
+    label {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      color: #8b949e;
+    }
+    input[type="range"] { width: 100px; accent-color: #58a6ff; }
+    input[type="checkbox"] { accent-color: #58a6ff; }
+    .stats {
+      font-family: ui-monospace, monospace;
+      font-size: 0.75rem;
+      color: #8b949e;
+    }
+    .legend {
+      display: flex;
+      gap: 1.25rem;
+      font-size: 0.75rem;
+      color: #8b949e;
+    }
+    .legend span::before {
+      content: "";
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      margin-right: 0.35rem;
+      border-radius: 2px;
+      vertical-align: middle;
+    }
+    .legend .dead::before { background: #161b22; border: 1px solid #30363d; }
+    .legend .live::before { background: #3fb950; }
+    .legend .ant::before { background: #f85149; border-radius: 50%; }
+  </style>
+</head>
+<body>
+  <h1>Langton's Ant × Conway's Life</h1>
+  <p class="subtitle">
+    Each tick: Life evolves, then ants turn and create life on empty cells or eat live ones (plus a bite into neighbors).
+    Drag to draw cells or ants (<strong>Ants</strong> tool, or hold <kbd>Shift</kbd>). Ants can stack; two or more on the same cell annihilate. Right-drag or <kbd>Alt</kbd> erases.
+  </p>
+  <div class="wrap">
+    <canvas id="c"></canvas>
+  </div>
+  <div class="controls">
+    <button id="play" class="active">Pause</button>
+    <button id="step">Step</button>
+    <button id="reset">Reset</button>
+    <button id="rand">Random soup</button>
+    <button id="fillLife">Fill life</button>
+    <button id="randAnts" class="tool-ant">Random ants</button>
+    <button id="fillAnts" class="tool-ant">Fill ants</button>
+    <div class="tools">
+      <button id="toolCells" class="active">Cells</button>
+      <button id="toolAnts" class="tool-ant">Ants</button>
+    </div>
+    <label>Speed <input type="range" id="speed" min="1" max="60" value="20"></label>
+    <label><input type="checkbox" id="torus" checked> Torus wrap</label>
+    <label><input type="checkbox" id="doubleLife"> 2× Life step</label>
+    <label>Reset ants <input type="range" id="antCount" min="1" max="32" value="1"></label>
+    <label>Brush <input type="range" id="brush" min="1" max="9" value="1"></label>
+  </div>
+  <div class="legend">
+    <span class="dead">Dead</span>
+    <span class="live">Alive (Langton “black”)</span>
+    <span class="ant">Ant</span>
+  </div>
+  <div class="stats" id="stats"></div>
+
+  <script>
+    const W = 160, H = 100, CELL = 6;
+    const canvas = document.getElementById("c");
+    const ctx = canvas.getContext("2d");
+    canvas.width = W * CELL;
+    canvas.height = H * CELL;
+
+    let grid = new Uint8Array(W * H);
+    let next = new Uint8Array(W * H);
+    let ants = [{ x: (W / 2) | 0, y: (H / 2) | 0, d: 0 }];
+    let running = true;
+    let resumeAfterDraw = false;
+    let tool = "cells";
+    let drawing = false;
+    let paintVal = 1;
+    let lastCell = null;
+    let strokeDir = 0;
+    let drawAnts = false;
+    let gen = 0;
+    let steps = 0;
+    const DX = [0, 1, 0, -1];
+    const DY = [-1, 0, 1, 0];
+
+    function cellFromEvent(e) {
+      const r = canvas.getBoundingClientRect();
+      return {
+        x: Math.min(W - 1, Math.max(0, ((e.clientX - r.left) / r.width * W) | 0)),
+        y: Math.min(H - 1, Math.max(0, ((e.clientY - r.top) / r.height * H) | 0)),
+      };
+    }
+
+    function brushRadius() {
+      return (+document.getElementById("brush").value - 1) >> 0;
+    }
+
+    function paintBrush(cx, cy, val) {
+      const r = brushRadius();
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (r > 0 && dx * dx + dy * dy > r * r) continue;
+          const x = cx + dx, y = cy + dy;
+          if (x < 0 || x >= W || y < 0 || y >= H) continue;
+          grid[y * W + x] = val;
+        }
+      }
+    }
+
+    function dirFromDelta(dx, dy) {
+      if (dx === 0 && dy === 0) return strokeDir;
+      if (Math.abs(dx) >= Math.abs(dy)) return dx > 0 ? 1 : 3;
+      return dy > 0 ? 2 : 0;
+    }
+
+    function normAntPos(a) {
+      return {
+        x: ((a.x % W) + W) % W,
+        y: ((a.y % H) + H) % H,
+      };
+    }
+
+    function antCellKey(ant) {
+      const p = normAntPos(ant);
+      return p.y * W + p.x;
+    }
+
+    function resolveAntCollisions() {
+      const buckets = new Map();
+      for (let i = 0; i < ants.length; i++) {
+        const key = antCellKey(ants[i]);
+        if (!buckets.has(key)) buckets.set(key, []);
+        buckets.get(key).push(i);
+      }
+      const remove = new Set();
+      for (const indices of buckets.values()) {
+        if (indices.length < 2) continue;
+        for (const i of indices) remove.add(i);
+      }
+      if (remove.size) ants = ants.filter((_, i) => !remove.has(i));
+    }
+
+    function removeAntsInDisc(cx, cy, r) {
+      ants = ants.filter((a) => {
+        const p = normAntPos(a);
+        const dx = p.x - cx, dy = p.y - cy;
+        if (r <= 0) return p.x !== cx || p.y !== cy;
+        return dx * dx + dy * dy > r * r;
+      });
+    }
+
+    function antBrush(cx, cy, add) {
+      const r = brushRadius();
+      if (!add) {
+        removeAntsInDisc(cx, cy, r);
+        return;
+      }
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (r > 0 && dx * dx + dy * dy > r * r) continue;
+          const x = cx + dx, y = cy + dy;
+          if (x < 0 || x >= W || y < 0 || y >= H) continue;
+          ants.push({ x, y, d: strokeDir });
+        }
+      }
+    }
+
+    function walkStroke(x, y, fn) {
+      if (!lastCell) {
+        fn(x, y);
+        lastCell = { x, y };
+        return;
+      }
+      let x0 = lastCell.x, y0 = lastCell.y;
+      const ddx = x - x0, ddy = y - y0;
+      if (ddx || ddy) strokeDir = dirFromDelta(ddx, ddy);
+      const dx = Math.abs(ddx), dy = Math.abs(ddy);
+      const sx = x0 < x ? 1 : -1, sy = y0 < y ? 1 : -1;
+      let err = dx - dy;
+      for (;;) {
+        fn(x0, y0);
+        if (x0 === x && y0 === y) break;
+        const e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 < dx) { err += dx; y0 += sy; }
+      }
+      lastCell = { x, y };
+    }
+
+    function strokeCells(x, y, val) {
+      walkStroke(x, y, (px, py) => paintBrush(px, py, val));
+    }
+
+    function strokeAnts(x, y, add) {
+      walkStroke(x, y, (px, py) => antBrush(px, py, add));
+    }
+
+    function setTool(next) {
+      tool = next;
+      document.getElementById("toolCells").classList.toggle("active", tool === "cells");
+      document.getElementById("toolAnts").classList.toggle("active", tool === "ants");
+    }
+
+    function beginDraw(e) {
+      drawAnts = tool === "ants" || e.shiftKey;
+      drawing = true;
+      canvas.classList.add("drawing");
+      if (drawAnts) canvas.classList.add("drawing-ants");
+      resumeAfterDraw = running;
+      running = false;
+      document.getElementById("play").textContent = "Play";
+      document.getElementById("play").classList.remove("active");
+      paintVal = (e.button === 2 || e.altKey) ? 0 : 1;
+      lastCell = null;
+      const { x, y } = cellFromEvent(e);
+      if (drawAnts) strokeAnts(x, y, paintVal === 1);
+      else strokeCells(x, y, paintVal);
+      draw();
+    }
+
+    function moveDraw(e) {
+      if (!drawing) return;
+      const { x, y } = cellFromEvent(e);
+      if (drawAnts) strokeAnts(x, y, paintVal === 1);
+      else strokeCells(x, y, paintVal);
+      draw();
+    }
+
+    function endDraw() {
+      if (!drawing) return;
+      drawing = false;
+      canvas.classList.remove("drawing", "drawing-ants");
+      lastCell = null;
+      if (resumeAfterDraw) {
+        running = true;
+        document.getElementById("play").textContent = "Pause";
+        document.getElementById("play").classList.add("active");
+      }
+    }
+
+    function idx(x, y) {
+      if (document.getElementById("torus").checked) {
+        x = (x % W + W) % W;
+        y = (y % H + H) % H;
+      } else if (x < 0 || x >= W || y < 0 || y >= H) return -1;
+      return y * W + x;
+    }
+
+    function get(x, y) {
+      const i = idx(x, y);
+      return i < 0 ? 0 : grid[i];
+    }
+
+    function set(x, y, v) {
+      const i = idx(x, y);
+      if (i >= 0) grid[i] = v;
+    }
+
+    function countNeighbors(x, y) {
+      let n = 0;
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++)
+          if (dx || dy) n += get(x + dx, y + dy);
+      return n;
+    }
+
+    function conwayStep() {
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const i = y * W + x;
+          const alive = grid[i];
+          const n = countNeighbors(x, y);
+          next[i] = alive ? (n === 2 || n === 3) : (n === 3);
+        }
+      }
+      const tmp = grid;
+      grid = next;
+      next = tmp;
+    }
+
+    function wrapAnt(ant) {
+      if (!document.getElementById("torus").checked) return;
+      ant.x = ((ant.x % W) + W) % W;
+      ant.y = ((ant.y % H) + H) % H;
+    }
+
+    function antCreate(x, y, d) {
+      set(x, y, 1);
+      const fx = x + DX[d], fy = y + DY[d];
+      if (!get(fx, fy)) set(fx, fy, 1);
+    }
+
+    function antEat(x, y) {
+      set(x, y, 0);
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          if (get(x + dx, y + dy)) set(x + dx, y + dy, 0);
+        }
+      }
+    }
+
+    function langtonStep() {
+      resolveAntCollisions();
+      for (const ant of ants) {
+        wrapAnt(ant);
+        const cell = get(ant.x, ant.y);
+        ant.d = (ant.d + (cell ? 3 : 1)) & 3;
+        if (cell) antEat(ant.x, ant.y);
+        else antCreate(ant.x, ant.y, ant.d);
+        ant.x += DX[ant.d];
+        ant.y += DY[ant.d];
+        if (!document.getElementById("torus").checked) {
+          if (ant.x < 0 || ant.x >= W || ant.y < 0 || ant.y >= H) {
+            ant.x = Math.max(0, Math.min(W - 1, ant.x));
+            ant.y = Math.max(0, Math.min(H - 1, ant.y));
+            ant.d = (ant.d + 2) & 3;
+          }
+        }
+      }
+      resolveAntCollisions();
+    }
+
+    function tick() {
+      conwayStep();
+      if (document.getElementById("doubleLife").checked) conwayStep();
+      langtonStep();
+      gen++;
+      steps += ants.length;
+    }
+
+    function draw() {
+      ctx.fillStyle = "#0d1117";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          if (!grid[y * W + x]) continue;
+          ctx.fillStyle = "#3fb950";
+          ctx.fillRect(x * CELL, y * CELL, CELL - (CELL > 4 ? 1 : 0), CELL - (CELL > 4 ? 1 : 0));
+        }
+      }
+      for (const ant of ants) {
+        const ax = ((ant.x % W) + W) % W;
+        const ay = ((ant.y % H) + H) % H;
+        const px = ax * CELL + CELL / 2;
+        const py = ay * CELL + CELL / 2;
+        const r = Math.max(2, CELL * 0.35);
+        ctx.fillStyle = "#f85149";
+        ctx.beginPath();
+        ctx.arc(px, py, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#ffa198";
+        ctx.lineWidth = 1;
+        const tip = 0.55 * CELL;
+        ctx.beginPath();
+        ctx.moveTo(px, py);
+        ctx.lineTo(px + DX[ant.d] * tip, py + DY[ant.d] * tip);
+        ctx.stroke();
+      }
+      const live = grid.reduce((a, b) => a + b, 0);
+      document.getElementById("stats").textContent =
+        `generation ${gen} · ${live} live cells · ${ants.length} ant(s) · ${steps} ant-steps`;
+    }
+
+    function reset() {
+      grid.fill(0);
+      next.fill(0);
+      gen = 0;
+      steps = 0;
+      const n = +document.getElementById("antCount").value;
+      ants = [];
+      for (let i = 0; i < n; i++) {
+        ants.push({
+          x: ((W / 2) + (i - n / 2) * 3) | 0,
+          y: ((H / 2) + (i % 3) * 2) | 0,
+          d: i & 3
+        });
+      }
+      draw();
+    }
+
+    function randomSoup() {
+      for (let i = 0; i < grid.length; i++)
+        grid[i] = Math.random() < 0.28 ? 1 : 0;
+      gen = 0;
+      draw();
+    }
+
+    function randomAnts() {
+      const n = +document.getElementById("antCount").value;
+      const used = new Set();
+      ants = [];
+      let attempts = 0;
+      while (ants.length < n && attempts < n * 50) {
+        attempts++;
+        const x = (Math.random() * W) | 0;
+        const y = (Math.random() * H) | 0;
+        const key = y * W + x;
+        if (used.has(key)) continue;
+        used.add(key);
+        ants.push({ x, y, d: (Math.random() * 4) | 0 });
+      }
+      draw();
+    }
+
+    function fillLife() {
+      grid.fill(1);
+      gen = 0;
+      draw();
+    }
+
+    function fillAnts() {
+      ants = [];
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          ants.push({ x, y, d: (x + y) & 3 });
+        }
+      }
+      draw();
+    }
+
+    let last = 0;
+    function loop(t) {
+      requestAnimationFrame(loop);
+      const fps = +document.getElementById("speed").value;
+      const interval = 1000 / fps;
+      if (running && t - last >= interval) {
+        tick();
+        draw();
+        last = t;
+      }
+    }
+
+    canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+    canvas.addEventListener("pointerdown", (e) => {
+      if (e.button > 2) return;
+      canvas.setPointerCapture(e.pointerId);
+      beginDraw(e);
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      if (canvas.hasPointerCapture(e.pointerId)) moveDraw(e);
+    });
+    canvas.addEventListener("pointerup", (e) => {
+      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+      endDraw();
+    });
+    canvas.addEventListener("pointercancel", endDraw);
+
+    document.getElementById("play").addEventListener("click", () => {
+      running = !running;
+      const btn = document.getElementById("play");
+      btn.textContent = running ? "Pause" : "Play";
+      btn.classList.toggle("active", running);
+      last = performance.now();
+    });
+    document.getElementById("step").addEventListener("click", () => { tick(); draw(); });
+    document.getElementById("reset").addEventListener("click", reset);
+    document.getElementById("rand").addEventListener("click", randomSoup);
+    document.getElementById("fillLife").addEventListener("click", fillLife);
+    document.getElementById("randAnts").addEventListener("click", randomAnts);
+    document.getElementById("fillAnts").addEventListener("click", fillAnts);
+    document.getElementById("antCount").addEventListener("change", reset);
+    document.getElementById("toolCells").addEventListener("click", () => setTool("cells"));
+    document.getElementById("toolAnts").addEventListener("click", () => setTool("ants"));
+
+    reset();
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
